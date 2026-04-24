@@ -13,6 +13,7 @@ class Member(Base):
     notify_sms = Column(Boolean, default=False)
     
     tasks = relationship("Task", back_populates="assignee")
+    events = relationship("Event", back_populates="assignee")
 
 class Task(Base):
     __tablename__ = "tasks"
@@ -27,3 +28,15 @@ class Task(Base):
     member_id = Column(Integer, ForeignKey("members.id"))
 
     assignee = relationship("Member", back_populates="tasks")
+
+class Event(Base):
+    __tablename__ = "events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, index=True)
+    description = Column(String)
+    date = Column(String)
+    status = Column(String, default="Upcoming") # Upcoming, Passed
+    member_id = Column(Integer, ForeignKey("members.id"))
+
+    assignee = relationship("Member", back_populates="events")

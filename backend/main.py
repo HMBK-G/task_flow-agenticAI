@@ -82,6 +82,22 @@ class TaskResponse(BaseModel):
     priority: str
     category: str
     member_name: str
+
+class EventBase(BaseModel):
+    title: str
+    description: str
+    date: str
+    member_name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+
+class EventResponse(BaseModel):
+    id: int
+    title: str
+    description: str
+    date: str
+    status: str
+    member_name: str
     
 class MemberResponse(BaseModel):
     id: int
@@ -160,19 +176,25 @@ async def assign_task(task_data: TaskBase, background_tasks: BackgroundTasks, db
     if not task_data.email and not task_data.phone:
         raise HTTPException(status_code=400, detail="At least email or phone is required")
 
+    email_val = task_data.email if task_data.email and task_data.email.strip() else None
+    phone_val = task_data.phone if task_data.phone and task_data.phone.strip() else None
+
     # Check if member exists
     member = None
-    if task_data.email:
-        member = db.query(models.Member).filter(models.Member.email == task_data.email).first()
-    if not member and task_data.phone:
-        member = db.query(models.Member).filter(models.Member.phone == task_data.phone).first()
+    if email_val:
+        member = db.query(models.Member).filter(models.Member.email == email_val).first()
+    if not member and phone_val:
+        member = db.query(models.Member).filter(models.Member.phone == phone_val).first()
+    if not member:
+        # Check by name
+        member = db.query(models.Member).filter(models.Member.name == task_data.member_name).first()
 
     # Create member if not exists
     if not member:
         member = models.Member(
             name=task_data.member_name,
-            email=task_data.email,
-            phone=task_data.phone
+            email=email_val,
+            phone=phone_val
         )
         db.add(member)
         db.commit()
@@ -198,6 +220,54 @@ async def assign_task(task_data: TaskBase, background_tasks: BackgroundTasks, db
 
     return {"message": "Task assigned successfully", "task_id": new_task.id}
 
+@app.get("/api/events", response_model=List[EventResponse])
+def get_events(db: Session = Depends(get_db)):
+    events = db.query(models.Event).all()
+    return [
+        {
+            "id": e.id,
+            "title": e.title,
+            "description": e.description,
+            "date": e.date,
+            "status": e.status,
+            "member_name": e.assignee.name
+        } for e in events
+    ]
+
+@app.post("/api/assign-event")
+async def assign_event(req: EventBase, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    member = db.query(models.Member).filter(models.Member.name == req.member_name).first()
+    if not member:
+        email_val = req.email if req.email and req.email.strip() else None
+        phone_val = req.phone if req.phone and req.phone.strip() else None
+        
+        # Check for conflicts
+        if email_val or phone_val:
+            conflict = db.query(models.Member).filter(
+                (models.Member.email == email_val) | (models.Member.phone == phone_val)
+            ).first()
+            if conflict:
+                raise HTTPException(status_code=400, detail="A different member already uses this email or phone number.")
+                
+        member = models.Member(name=req.member_name, email=email_val, phone=phone_val)
+        db.add(member)
+        db.commit()
+        db.refresh(member)
+    
+    new_event = models.Event(
+        title=req.title,
+        description=req.description,
+        date=req.date,
+        member_id=member.id,
+        status="Upcoming"
+    )
+    db.add(new_event)
+    db.commit()
+    db.refresh(new_event)
+    
+    background_tasks.add_task(send_notifications, member.name, new_event.title, new_event.date, member.email, member.phone)
+    return {"message": "Event assigned successfully", "event_id": new_event.id}
+
 @app.get("/api/dashboard")
 async def get_dashboard_data(db: Session = Depends(get_db)):
     total_tasks = db.query(models.Task).count()
@@ -205,8 +275,10 @@ async def get_dashboard_data(db: Session = Depends(get_db)):
     in_progress = db.query(models.Task).filter(models.Task.status == "In Progress").count()
     urgent = db.query(models.Task).filter(models.Task.priority == "High").count()
     members_count = db.query(models.Member).count()
+    events_count = db.query(models.Event).count()
     
     recent_tasks = db.query(models.Task).order_by(models.Task.id.desc()).limit(4).all()
+    upcoming_events = db.query(models.Event).order_by(models.Event.date.asc()).limit(3).all()
     members = db.query(models.Member).all()
     
     return {
@@ -216,7 +288,7 @@ async def get_dashboard_data(db: Session = Depends(get_db)):
             "in_progress": in_progress,
             "urgent": urgent,
             "members_count": members_count,
-            "events_count": 0 # Placeholder for now
+            "events_count": events_count
         },
         "recent_tasks": [
             {
@@ -239,7 +311,13 @@ async def get_dashboard_data(db: Session = Depends(get_db)):
                 "tasks_total": len(m.tasks)
             } for m in members
         ],
-        "upcoming_events": []
+        "upcoming_events": [
+            {
+                "id": e.id,
+                "name": e.title,
+                "date": e.date,
+            } for e in upcoming_events
+        ]
     }
 
 @app.get("/api/members", response_model=List[MemberResponse])
@@ -391,6 +469,8 @@ async def process_ai(query: AIRequest, background_tasks: BackgroundTasks, db: Se
         "2. Add task: [ACTION: {\"type\": \"add_task\", \"title\": \"Title\", \"member_name\": \"Name\", \"deadline\": \"YYYY-MM-DD\"}]\n"
         "3. Delete task: [ACTION: {\"type\": \"delete_task\", \"task_id\": 123}]\n"
         "4. Send notification: [ACTION: {\"type\": \"send_notification\", \"member_name\": \"Name\", \"message\": \"Your message here\"}]\n"
+        "5. Delete duplicates: [ACTION: {\"type\": \"delete_duplicates\"}]\n"
+        "6. Delete all: [ACTION: {\"type\": \"delete_all\", \"target\": \"tasks\"}] (Targets can be 'tasks', 'events', 'members', or 'all')\n"
         "\nIMPORTANT: Be extremely concise. DO NOT show internal IDs or full lists to the user unless they ask. "
         "You have real email/SMS capabilities. When you add a task, tell the user: 'Task assigned and notification sent to [Name].'"
     )
@@ -427,13 +507,15 @@ async def process_ai(query: AIRequest, background_tasks: BackgroundTasks, db: Se
             
             if a_type == "add_member":
                 # Check if we have enough info
-                if not action_data.get("email") and not action_data.get("phone"):
-                    response_text = "I'd love to add " + action_data.get("name") + ", but I need an email or phone number to notify them. Could you provide one?"
+                if not action_data.get("email"):
+                    response_text = "I'd love to add " + action_data.get("name") + ", but I need their email address. Could you provide one?"
                 else:
+                    em = action_data.get("email")
+                    ph = action_data.get("phone")
                     new_member = models.Member(
                         name=action_data["name"],
-                        email=action_data.get("email"),
-                        phone=action_data.get("phone")
+                        email=em if em and em.strip() else None,
+                        phone=ph if ph and ph.strip() else None
                     )
                     db.add(new_member)
                     db.commit()
@@ -475,6 +557,78 @@ async def process_ai(query: AIRequest, background_tasks: BackgroundTasks, db: Se
                     if not response_text: response_text = f"✅ Deleted task '{title}'."
                 else:
                     response_text = "I couldn't find that task to delete."
+
+            elif a_type == "delete_duplicates":
+                deleted_count = 0
+                
+                # Delete duplicate Members
+                members = db.query(models.Member).all()
+                seen_members = {}
+                for m in members:
+                    identifier = m.name.lower().strip()
+                    if identifier in seen_members:
+                        # Reassign tasks and events to the original member to prevent foreign key errors
+                        orig_id = seen_members[identifier]
+                        db.query(models.Task).filter(models.Task.member_id == m.id).update({"member_id": orig_id})
+                        db.query(models.Event).filter(models.Event.member_id == m.id).update({"member_id": orig_id})
+                        db.delete(m)
+                        deleted_count += 1
+                    else:
+                        seen_members[identifier] = m.id
+
+                # Delete duplicate Tasks
+                tasks = db.query(models.Task).all()
+                seen_tasks = set()
+                for task in tasks:
+                    identifier = task.title.lower().strip()
+                    if identifier in seen_tasks:
+                        db.delete(task)
+                        deleted_count += 1
+                    else:
+                        seen_tasks.add(identifier)
+                
+                # Delete duplicate Events
+                events = db.query(models.Event).all()
+                seen_events = set()
+                for event in events:
+                    identifier = event.title.lower().strip()
+                    if identifier in seen_events:
+                        db.delete(event)
+                        deleted_count += 1
+                    else:
+                        seen_events.add(identifier)
+
+                if deleted_count > 0:
+                    db.commit()
+                response_text = response_text.replace(action_match.group(0), "").strip()
+                if not response_text: response_text = f"✅ Cleaned up and deleted {deleted_count} duplicate entries."
+
+            elif a_type == "delete_all":
+                target = action_data.get("target", "all")
+                deleted = []
+                
+                if target in ["tasks", "all"]:
+                    count = db.query(models.Task).delete()
+                    if count > 0: deleted.append(f"{count} tasks")
+                
+                if target in ["events", "all"]:
+                    count = db.query(models.Event).delete()
+                    if count > 0: deleted.append(f"{count} events")
+                
+                if target in ["members", "all"]:
+                    if target == "members":
+                        db.query(models.Task).delete()
+                        db.query(models.Event).delete()
+                    count = db.query(models.Member).delete()
+                    if count > 0: deleted.append(f"{count} members")
+                
+                db.commit()
+                response_text = response_text.replace(action_match.group(0), "").strip()
+                if not response_text: 
+                    if deleted:
+                        response_text = f"✅ Wipe complete. Deleted all {', '.join(deleted)}."
+                    else:
+                        response_text = f"✅ Database was already empty."
 
             elif a_type == "send_notification":
                 member_name = action_data.get("member_name")

@@ -19,6 +19,13 @@ const notifications = [
 
 export default function Header({ title, subtitle, onOpenChat }) {
   const { user } = useAuth();
+  const [hasUnread, setHasUnread] = React.useState(() => localStorage.getItem('hasUnread') !== 'false');
+
+  React.useEffect(() => {
+    const handleRead = () => setHasUnread(false);
+    window.addEventListener('notificationsRead', handleRead);
+    return () => window.removeEventListener('notificationsRead', handleRead);
+  }, []);
 
   return (
     <header className="flex justify-between items-start mb-8">
@@ -30,7 +37,7 @@ export default function Header({ title, subtitle, onOpenChat }) {
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <div className="relative cursor-pointer">
-              <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white"></span>
+              {hasUnread && <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white"></span>}
               <button className="p-2.5 bg-white rounded-xl border border-slate-100 shadow-sm hover:bg-slate-50 transition-all duration-200">
                 <span className="sr-only">Notifications</span>
                 <Bell className="size-5 text-slate-600" />

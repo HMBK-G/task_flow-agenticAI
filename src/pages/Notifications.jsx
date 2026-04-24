@@ -15,6 +15,8 @@ export default function Notifications({ onOpenChat }) {
 
   const markAllAsRead = () => {
     setNotifications(notifications.map(n => ({ ...n, unread: false })));
+    localStorage.setItem('hasUnread', 'false');
+    window.dispatchEvent(new Event('notificationsRead'));
   };
 
   return (

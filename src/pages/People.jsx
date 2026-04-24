@@ -55,6 +55,41 @@ export default function People({ onOpenChat }) {
 
   if (loading) return <div className="p-8 text-slate-500">Loading members...</div>;
 
+  const handleExport = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/tasks`);
+      const tasks = res.data;
+      
+      const headers = ['Task ID', 'Member Name', 'Task Title', 'Description', 'Status', 'Deadline', 'Priority', 'Category'];
+      const csvContent = [
+        headers.join(','),
+        ...tasks.map(t => [
+          t.id, 
+          `"${t.member_name || ''}"`, 
+          `"${(t.title || '').replace(/"/g, '""')}"`, 
+          `"${(t.description || '').replace(/"/g, '""')}"`, 
+          `"${t.status || ''}"`, 
+          `"${t.deadline || ''}"`, 
+          `"${t.priority || ''}"`, 
+          `"${t.category || ''}"`
+        ].join(','))
+      ].join('\n');
+
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.setAttribute('href', url);
+      link.setAttribute('download', 'taskflow_export.csv');
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err) {
+      console.error('Export failed', err);
+      alert('Failed to export list');
+    }
+  };
+
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-6 animate-in fade-in duration-500">
       <Header 
@@ -64,7 +99,7 @@ export default function People({ onOpenChat }) {
       />
       
       <div className="flex justify-end gap-2">
-        <Button variant="outline" className="border-slate-200">Export List</Button>
+        <Button variant="outline" className="border-slate-200" onClick={handleExport}>Export List</Button>
         <AddMemberModal onMemberAdded={fetchMembers} />
       </div>
 
@@ -94,6 +129,8 @@ function MemberCard({ member, onRefresh }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(member.name);
   const [editRole, setEditRole] = useState(member.role);
+  const [editEmail, setEditEmail] = useState(member.email || '');
+  const [editPhone, setEditPhone] = useState(member.phone || '');
 
   const handleDelete = async () => {
     if (!window.confirm(`Remove ${member.name} from the club?`)) return;
@@ -107,7 +144,7 @@ function MemberCard({ member, onRefresh }) {
 
   const handleEdit = async () => {
     try {
-      await axios.put(`${API_BASE}/members/${member.id}`, { name: editName, role: editRole });
+      await axios.put(`${API_BASE}/members/${member.id}`, { name: editName, role: editRole, email: editEmail, phone: editPhone });
       setIsEditing(false);
       onRefresh();
     } catch (err) {
@@ -132,11 +169,25 @@ function MemberCard({ member, onRefresh }) {
                     value={editName}
                     onChange={e => setEditName(e.target.value)}
                     className="h-7 text-sm font-bold border-indigo-300 focus-visible:ring-indigo-500"
+                    placeholder="Name"
                   />
                   <Input
                     value={editRole}
                     onChange={e => setEditRole(e.target.value)}
                     className="h-6 text-xs border-indigo-200 focus-visible:ring-indigo-400"
+                    placeholder="Role"
+                  />
+                  <Input
+                    value={editEmail}
+                    onChange={e => setEditEmail(e.target.value)}
+                    className="h-6 text-xs border-indigo-200 focus-visible:ring-indigo-400"
+                    placeholder="Email"
+                  />
+                  <Input
+                    value={editPhone}
+                    onChange={e => setEditPhone(e.target.value)}
+                    className="h-6 text-xs border-indigo-200 focus-visible:ring-indigo-400"
+                    placeholder="Phone"
                   />
                 </div>
               ) : (
@@ -203,11 +254,8 @@ function MemberCard({ member, onRefresh }) {
             {showEmail ? (
               <span className="text-xs truncate px-1">{member.email}</span>
             ) : (
-              <><Mail className="size-4 mr-2" /> Email</>
+              <><Mail className="size-4 mr-2" /> Show Email</>
             )}
-          </Button>
-          <Button className="flex-1 h-10 bg-indigo-600 hover:bg-indigo-700 shadow-sm">
-            <MessageSquare className="size-4 mr-2" /> Message
           </Button>
         </div>
       </CardContent>

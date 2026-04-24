@@ -9,7 +9,9 @@ import {
   Settings, 
   LogOut,
   Menu,
-  PlusCircle
+  PlusCircle,
+  CalendarPlus,
+  CalendarRange
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -17,6 +19,8 @@ const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/tasks/new', label: 'Create Task', icon: PlusCircle },
   { to: '/tasks', label: 'Tasks', icon: ListChecks },
+  { to: '/events/new', label: 'Create Event', icon: CalendarPlus },
+  { to: '/events', label: 'Events', icon: CalendarRange },
   { to: '/people', label: 'People', icon: Users },
   { to: '/calendar', label: 'Calendar', icon: CalendarDays },
   { to: '/settings', label: 'Settings', icon: Settings },

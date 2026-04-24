@@ -16,6 +16,7 @@ import Notifications from '@/pages/Notifications';
 import CalendarView from '@/pages/CalendarView';
 import ChatPanel from '@/components/ChatPanel';
 import TaskCreation from '@/pages/TaskCreation';
+import EventCreation from '@/pages/EventCreation';
 
 const AuthenticatedApp = () => {
   const { isAuthenticated } = useAuth();
@@ -42,6 +43,7 @@ const AuthenticatedApp = () => {
           <Route path="/tasks" element={<Tasks onOpenChat={openChat} />} />
           <Route path="/tasks/new" element={<TaskCreation />} />
           <Route path="/people" element={<People onOpenChat={openChat} />} />
+          <Route path="/events/new" element={<EventCreation />} />
           <Route path="/events" element={<Events onOpenChat={openChat} />} />
           <Route path="/calendar" element={<CalendarView onOpenChat={openChat} />} />
           <Route path="/settings" element={<Settings onOpenChat={openChat} />} />
