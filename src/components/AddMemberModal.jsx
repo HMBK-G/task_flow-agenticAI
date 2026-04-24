@@ -3,6 +3,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Checkbox } from '@/components/ui/checkbox';
 import { UserPlus, Loader2, Plus } from 'lucide-react';
 import axios from 'axios';
 
@@ -14,7 +15,10 @@ export default function AddMemberModal({ onMemberAdded }) {
   const [formData, setFormData] = useState({
     name: '',
     role: '',
-    email: ''
+    email: '',
+    phone: '',
+    notify_email: true,
+    notify_sms: false
   });
 
   const handleSubmit = async (e) => {
@@ -25,7 +29,7 @@ export default function AddMemberModal({ onMemberAdded }) {
       await axios.post(`${API_BASE}/members`, formData);
       setOpen(false);
       if (onMemberAdded) onMemberAdded();
-      setFormData({ name: '', role: '', email: '' });
+      setFormData({ name: '', role: '', email: '', phone: '', notify_email: true, notify_sms: false });
     } catch (err) {
       alert("Failed to add member");
     } finally {
@@ -86,6 +90,40 @@ export default function AddMemberModal({ onMemberAdded }) {
               value={formData.email}
               onChange={e => setFormData({...formData, email: e.target.value})}
             />
+          </div>
+
+          <div className="space-y-2">
+            <Label className="text-slate-700 text-xs uppercase font-bold tracking-wider">Phone Number</Label>
+            <Input 
+              placeholder="e.g. +1234567890"
+              className="h-11 rounded-xl bg-slate-50 border-slate-200 focus-visible:ring-indigo-600 transition-all"
+              value={formData.phone}
+              onChange={e => setFormData({...formData, phone: e.target.value})}
+            />
+          </div>
+
+          <div className="flex flex-col gap-3 pt-2">
+            <Label className="text-slate-700 text-xs uppercase font-bold tracking-wider">Notification Preferences</Label>
+            <div className="flex items-center space-x-2">
+              <Checkbox 
+                id="notify_email" 
+                checked={formData.notify_email}
+                onCheckedChange={(checked) => setFormData({...formData, notify_email: checked})}
+              />
+              <label htmlFor="notify_email" className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
+                Notify via Email
+              </label>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Checkbox 
+                id="notify_sms" 
+                checked={formData.notify_sms}
+                onCheckedChange={(checked) => setFormData({...formData, notify_sms: checked})}
+              />
+              <label htmlFor="notify_sms" className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
+                Notify via SMS
+              </label>
+            </div>
           </div>
 
           <div className="pt-2">

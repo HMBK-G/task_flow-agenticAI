@@ -8,15 +8,16 @@ import {
   CalendarDays, 
   Settings, 
   LogOut,
-  Menu
+  Menu,
+  PlusCircle
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
+  { to: '/tasks/new', label: 'Create Task', icon: PlusCircle },
   { to: '/tasks', label: 'Tasks', icon: ListChecks },
   { to: '/people', label: 'People', icon: Users },
-  { to: '/events', label: 'Events', icon: CalendarDays },
   { to: '/calendar', label: 'Calendar', icon: CalendarDays },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];

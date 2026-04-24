@@ -217,14 +217,14 @@ function TaskCard({ task, onUpdate }) {
           <div className="flex items-center gap-2">
             <Avatar className="size-6 bg-indigo-50">
               <AvatarFallback className="text-[10px] text-indigo-600 font-bold">
-                {task.assignee_name.charAt(0)}
+                {task.member_name.charAt(0)}
               </AvatarFallback>
             </Avatar>
-            <span className="text-[11px] font-medium text-slate-500">{task.assignee_name}</span>
+            <span className="text-[11px] font-medium text-slate-500">{task.member_name}</span>
           </div>
           <div className="flex items-center gap-1 text-slate-400">
             <Calendar className="size-3" />
-            <span className="text-[10px] font-medium">{task.due_date}</span>
+            <span className="text-[10px] font-medium">{task.deadline}</span>
           </div>
         </div>
       </CardContent>

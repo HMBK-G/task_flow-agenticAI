@@ -70,7 +70,7 @@ export default function Tasks({ onOpenChat }) {
 
   const filteredTasks = tasks.filter(t => 
     t.title.toLowerCase().includes(search.toLowerCase()) ||
-    t.assignee_name.toLowerCase().includes(search.toLowerCase())
+    t.member_name.toLowerCase().includes(search.toLowerCase())
   );
 
   if (loading) return <div className="p-8 text-slate-500">Loading tasks...</div>;
@@ -239,10 +239,10 @@ function TaskListItem({ task, onRefresh }) {
             {!isEditing && (
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
                 <span className="flex items-center gap-1">
-                  <Users className="size-3" /> {task.assignee_name}
+                  <Users className="size-3" /> {task.member_name}
                 </span>
                 <span className="flex items-center gap-1">
-                  <Calendar className="size-3" /> Due {task.due_date}
+                  <Calendar className="size-3" /> Due {task.deadline}
                 </span>
                 {task.category && (
                   <span className="px-2 py-0.5 bg-slate-50 rounded text-slate-400 font-medium italic">

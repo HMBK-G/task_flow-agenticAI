@@ -1,13 +1,41 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
-import uuid
 import os
+import uuid
 from groq import Groq
 from openai import OpenAI
+from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
+from twilio.rest import Client as TwilioClient
+from dotenv import load_dotenv
+from sqlalchemy.orm import Session
+import resend
 
-app = FastAPI(title="TaskFlow API")
+from . import models, database
+from .database import engine, get_db
+
+load_dotenv()
+
+# Create database tables
+models.Base.metadata.create_all(bind=engine)
+
+def seed_db():
+    db = next(get_db())
+    if db.query(models.Member).count() == 0:
+        member1 = models.Member(name="LATHA", email="ynglatha@gmail.com", phone="+1234567890")
+        member2 = models.Member(name="Hmbk", email="hmbkganta@gmail.com", phone="+0987654321")
+        db.add(member1)
+        db.add(member2)
+        db.commit()
+        
+        task1 = models.Task(title="Initial Assessment", description="Welcome task", deadline="2026-12-31", member_id=1, status="Pending", priority="Medium", category="General")
+        db.add(task1)
+        db.commit()
+
+seed_db()
+
+app = FastAPI(title="Agentic AI Club Workflow API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,258 +45,380 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Models
-class Member(BaseModel):
-    id: str
+# --- Configuration ---
+conf = ConnectionConfig(
+    MAIL_USERNAME = os.getenv("MAIL_USERNAME", ""),
+    MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", ""),
+    MAIL_FROM = os.getenv("MAIL_FROM", "noreply@taskflow.com"),
+    MAIL_PORT = int(os.getenv("MAIL_PORT", 587)),
+    MAIL_SERVER = os.getenv("MAIL_SERVER", "smtp.gmail.com"),
+    MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "TaskFlow"),
+    MAIL_STARTTLS = os.getenv("MAIL_STARTTLS", "True") == "True",
+    MAIL_SSL_TLS = os.getenv("MAIL_SSL_TLS", "False") == "True",
+    USE_CREDENTIALS = os.getenv("USE_CREDENTIALS", "True") == "True",
+    VALIDATE_CERTS = os.getenv("VALIDATE_CERTS", "True") == "True"
+)
+
+# --- Pydantic Models ---
+class TaskBase(BaseModel):
+    title: str
+    description: str
+    deadline: str
+    priority: str = "Medium"
+    category: str = "General"
+    member_name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+
+class TaskUpdate(BaseModel):
+    status: str
+
+class TaskResponse(BaseModel):
+    id: int
+    title: str
+    description: str
+    status: str
+    deadline: str
+    priority: str
+    category: str
+    member_name: str
+    
+class MemberResponse(BaseModel):
+    id: int
     name: str
-    role: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
     initials: str
-    email: str = "no-email@example.com"
-    tasks_count: int = 0
-    tasks_total: int = 3
+    tasks_count: int
+    tasks_total: int
+    role: str = "Member"
 
-class MemberCreate(BaseModel):
-    name: str
-    role: str
-    email: str = "no-email@example.com"
+    class Config:
+        from_attributes = True
 
-class Task(BaseModel):
-    id: str
-    title: str
+class AIRequest(BaseModel):
+    title: Optional[str] = ""
     description: Optional[str] = ""
-    assignee_id: str
-    assignee_name: str
-    priority: str
-    status: str
-    category: Optional[str] = ""
-    due_date: str
-
-class TaskCreate(BaseModel):
-    title: str
-    description: Optional[str] = ""
-    assignee_id: str
-    priority: str
-    status: str
-    category: Optional[str] = ""
-    due_date: str
-
-class Event(BaseModel):
-    id: str
-    name: str
-    date: str
-    member_name: Optional[str] = "Unassigned"
-
-class EventCreate(BaseModel):
-    name: str
-    date: str
-    member_name: Optional[str] = "Unassigned"
+    messages: Optional[list] = None
 
 class AISettings(BaseModel):
     openai_key: Optional[str] = ""
     groq_key: Optional[str] = ""
 
-# In-memory database
-db_members = [
-    Member(id="1", name="LATHA", role="Member", initials="L", email="latha@example.com", tasks_count=2, tasks_total=3),
-    Member(id="2", name="Karthikeyani", role="Member", initials="K", email="karthikeyani@example.com", tasks_count=1, tasks_total=3),
-    Member(id="3", name="Geeta", role="Member", initials="G", email="geeta@example.com", tasks_count=1, tasks_total=3),
-    Member(id="4", name="Raja", role="Member", initials="R", email="raja@example.com", tasks_count=0, tasks_total=3),
-]
+# --- Notification Logic ---
+async def send_notifications(member_name: str, task_title: str, deadline: str, email: str = None, phone: str = None):
+    message_text = f"Hello {member_name}, you have been assigned a task: {task_title}. Deadline: {deadline}."
+    
+    # Email
+    resend_key = os.getenv("RESEND_API_KEY")
+    if email:
+        if resend_key:
+            try:
+                resend.api_key = resend_key
+                resend.Emails.send({
+                    "from": "onboarding@resend.dev",
+                    "to": email,
+                    "subject": f"New Task Assigned: {task_title}",
+                    "html": f"<strong>Hi {member_name},</strong><br><br>You have been assigned a new task: <strong>{task_title}</strong>.<br>Deadline: {deadline}<br><br>Check TaskFlow for details."
+                })
+                print(f"Email sent via Resend to {email}")
+            except Exception as e:
+                print(f"Resend error: {e}")
+        elif conf.MAIL_USERNAME:
+            message = MessageSchema(
+                subject="New Task Assigned",
+                recipients=[email],
+                body=message_text,
+                subtype=MessageType.plain
+            )
+            fm = FastMail(conf)
+            try:
+                await fm.send_message(message)
+                print(f"Email sent via SMTP to {email}")
+            except Exception as e:
+                print(f"SMTP error: {e}")
+        else:
+            print("No Email API or SMTP configured. Skipping email.")
 
-db_tasks = [
-    Task(id="t1", title="Ad Assessment Work", description="Assessment work related to the Kartika inning.", assignee_id="2", assignee_name="Karthikeyani", priority="Medium", status="To Do", category="", due_date="Apr 30"),
-    Task(id="t2", title="AI homework", description="Complete the assigned AI homework.", assignee_id="1", assignee_name="LATHA", priority="Medium", status="To Do", category="development", due_date="Apr 30"),
-    Task(id="t3", title="Time Table Scheduler", description="Create a schedule for managing time tables effectively.", assignee_id="3", assignee_name="Geeta", priority="Medium", status="To Do", category="development", due_date="Apr 30"),
-    Task(id="t4", title="Cast to Raja", description="", assignee_id="1", assignee_name="LATHA", priority="Medium", status="To Do", category="development", due_date="Apr 30"),
-]
+    # SMS (Twilio)
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    from_number = os.getenv("TWILIO_FROM_NUMBER")
+    
+    if phone and all([account_sid, auth_token, from_number]):
+        try:
+            client = TwilioClient(account_sid, auth_token)
+            client.messages.create(body=message_text, from_=from_number, to=phone)
+            print(f"SMS sent to {phone}")
+        except Exception as e:
+            print(f"SMS error: {e}")
 
-db_events = [
-    Event(id="e1", name="Agent", date="Apr 24, 2026"),
-]
+# --- API Endpoints ---
 
-db_settings = AISettings()
+@app.post("/api/assign-task")
+async def assign_task(task_data: TaskBase, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    if not task_data.email and not task_data.phone:
+        raise HTTPException(status_code=400, detail="At least email or phone is required")
 
-# API Endpoints
+    # Check if member exists
+    member = None
+    if task_data.email:
+        member = db.query(models.Member).filter(models.Member.email == task_data.email).first()
+    if not member and task_data.phone:
+        member = db.query(models.Member).filter(models.Member.phone == task_data.phone).first()
+
+    # Create member if not exists
+    if not member:
+        member = models.Member(
+            name=task_data.member_name,
+            email=task_data.email,
+            phone=task_data.phone
+        )
+        db.add(member)
+        db.commit()
+        db.refresh(member)
+
+    # Create task
+    new_task = models.Task(
+        title=task_data.title,
+        description=task_data.description,
+        deadline=task_data.deadline,
+        priority=task_data.priority,
+        category=task_data.category,
+        member_id=member.id,
+        status="Pending"
+    )
+    db.add(new_task)
+    db.commit()
+    db.refresh(new_task)
+
+    # Trigger real notification
+    background_tasks.add_task(send_notifications, member.name, new_task.title, new_task.deadline, member.email, member.phone)
+    print(f"DEBUG: Triggered notification for {member.name} on task {new_task.title}")
+
+    return {"message": "Task assigned successfully", "task_id": new_task.id}
+
 @app.get("/api/dashboard")
-async def get_dashboard_data():
+async def get_dashboard_data(db: Session = Depends(get_db)):
+    total_tasks = db.query(models.Task).count()
+    completed_tasks = db.query(models.Task).filter(models.Task.status == "Completed").count()
+    in_progress = db.query(models.Task).filter(models.Task.status == "In Progress").count()
+    urgent = db.query(models.Task).filter(models.Task.priority == "High").count()
+    members_count = db.query(models.Member).count()
+    
+    recent_tasks = db.query(models.Task).order_by(models.Task.id.desc()).limit(4).all()
+    members = db.query(models.Member).all()
+    
     return {
         "stats": {
-            "total_tasks": len(db_tasks),
-            "completed_tasks": len([t for t in db_tasks if t.status == "Completed"]),
-            "in_progress": len([t for t in db_tasks if t.status == "In Progress"]),
-            "urgent": len([t for t in db_tasks if t.priority == "High"]),
-            "members_count": len(db_members),
-            "events_count": len(db_events)
+            "total_tasks": total_tasks,
+            "completed_tasks": completed_tasks,
+            "in_progress": in_progress,
+            "urgent": urgent,
+            "members_count": members_count,
+            "events_count": 0 # Placeholder for now
         },
-        "recent_tasks": db_tasks,
-        "member_activity": db_members,
-        "upcoming_events": db_events
+        "recent_tasks": [
+            {
+                "id": t.id,
+                "title": t.title,
+                "description": t.description,
+                "status": t.status,
+                "deadline": t.deadline,
+                "priority": t.priority,
+                "category": t.category,
+                "member_name": t.assignee.name
+            } for t in recent_tasks
+        ],
+        "member_activity": [
+            {
+                "id": m.id,
+                "name": m.name,
+                "initials": m.name[0].upper() if m.name else "?",
+                "tasks_count": len([t for t in m.tasks if t.status != "Completed"]),
+                "tasks_total": len(m.tasks)
+            } for m in members
+        ],
+        "upcoming_events": []
     }
 
-@app.get("/api/tasks", response_model=List[Task])
-async def get_tasks():
-    return db_tasks
+@app.get("/api/members", response_model=List[MemberResponse])
+def get_members(db: Session = Depends(get_db)):
+    members = db.query(models.Member).all()
+    response = []
+    for m in members:
+        response.append({
+            "id": m.id,
+            "name": m.name,
+            "email": m.email,
+            "phone": m.phone,
+            "initials": m.name[0].upper() if m.name else "?",
+            "tasks_count": len([t for t in m.tasks if t.status == "Completed"]),
+            "tasks_total": len(m.tasks),
+            "role": "Member" # You might want to add this to the model later
+        })
+    return response
 
-@app.post("/api/tasks", response_model=Task)
-async def create_task(task: TaskCreate):
-    assignee = next((m for m in db_members if m.id == task.assignee_id), None)
-    if not assignee:
-        raise HTTPException(status_code=404, detail="Assignee not found")
-    
-    new_task = Task(
-        id=str(uuid.uuid4()),
-        **task.model_dump(),
-        assignee_name=assignee.name
-    )
-    db_tasks.append(new_task)
-    assignee.tasks_count += 1
-    return new_task
-
-@app.put("/api/tasks/{task_id}", response_model=Task)
-async def update_task(task_id: str, task_update: dict):
-    task = next((t for t in db_tasks if t.id == task_id), None)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    
-    for key, value in task_update.items():
-        if hasattr(task, key):
-            setattr(task, key, value)
-    
-    return task
-
-@app.delete("/api/tasks/{task_id}")
-async def delete_task(task_id: str):
-    global db_tasks
-    task = next((t for t in db_tasks if t.id == task_id), None)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    
-    db_tasks = [t for t in db_tasks if t.id != task_id]
-    assignee = next((m for m in db_members if m.id == task.assignee_id), None)
-    if assignee:
-        assignee.tasks_count = max(0, assignee.tasks_count - 1)
-    return {"detail": "Task deleted"}
-
-@app.get("/api/members", response_model=List[Member])
-async def get_members():
-    return db_members
-
-@app.post("/api/members", response_model=Member)
-async def create_member(member: MemberCreate):
-    new_member = Member(
-        id=str(uuid.uuid4()),
-        name=member.name,
-        role=member.role,
-        email=member.email,
-        initials=member.name[0].upper() if member.name else "?",
-        tasks_count=0,
-        tasks_total=0
-    )
-    db_members.append(new_member)
-    return new_member
-
-@app.put("/api/members/{member_id}", response_model=Member)
-async def update_member(member_id: str, updates: dict):
-    member = next((m for m in db_members if m.id == member_id), None)
+@app.put("/api/members/{member_id}")
+def update_member(member_id: int, update: dict, db: Session = Depends(get_db)):
+    member = db.query(models.Member).filter(models.Member.id == member_id).first()
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
-    for key, value in updates.items():
+    for key, value in update.items():
         if hasattr(member, key):
             setattr(member, key, value)
-    # Recompute initials if name changed
-    if 'name' in updates and updates['name']:
-        member.initials = updates['name'][0].upper()
-    return member
+    db.commit()
+    return {"message": "Member updated"}
 
 @app.delete("/api/members/{member_id}")
-async def delete_member(member_id: str):
-    global db_members
-    member = next((m for m in db_members if m.id == member_id), None)
+def delete_member(member_id: int, db: Session = Depends(get_db)):
+    member = db.query(models.Member).filter(models.Member.id == member_id).first()
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
-    db_members = [m for m in db_members if m.id != member_id]
-    return {"detail": "Member deleted"}
+    db.delete(member)
+    db.commit()
+    return {"message": "Member deleted"}
 
-@app.get("/api/events", response_model=List[Event])
-async def get_events():
-    return db_events
+@app.get("/api/tasks", response_model=List[TaskResponse])
+def get_tasks(db: Session = Depends(get_db)):
+    tasks = db.query(models.Task).all()
+    # Manually map member_name
+    response = []
+    for t in tasks:
+        response.append({
+            "id": t.id,
+            "title": t.title,
+            "description": t.description,
+            "status": t.status,
+            "deadline": t.deadline,
+            "priority": t.priority,
+            "category": t.category,
+            "member_name": t.assignee.name
+        })
+    return response
 
-@app.post("/api/events", response_model=Event)
-async def create_event(event: EventCreate):
-    new_event = Event(
-        id=str(uuid.uuid4()),
-        **event.model_dump()
-    )
-    db_events.append(new_event)
-    return new_event
+@app.put("/api/tasks/{task_id}")
+def update_task_status(task_id: int, update: TaskUpdate, db: Session = Depends(get_db)):
+    task = db.query(models.Task).filter(models.Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task.status = update.status
+    db.commit()
+    return {"message": "Status updated"}
+
+@app.delete("/api/tasks/{task_id}")
+def delete_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.query(models.Task).filter(models.Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    db.delete(task)
+    db.commit()
+    return {"message": "Task deleted"}
+
+# --- Agentic AI Features ---
 
 @app.get("/api/settings", response_model=AISettings)
 async def get_settings():
-    return db_settings
+    return AISettings(
+        openai_key=os.getenv("OPENAI_API_KEY", ""),
+        groq_key=os.getenv("GROQ_API_KEY", "")
+    )
 
 @app.post("/api/settings")
 async def update_settings(settings: AISettings):
-    global db_settings
-    db_settings = settings
+    # For a simple local app, we update the environment variables
+    # In a real app, you'd save this to a DB
+    os.environ["OPENAI_API_KEY"] = settings.openai_key
+    os.environ["GROQ_API_KEY"] = settings.groq_key
     return {"detail": "Settings updated"}
 
-class AIRequest(BaseModel):
-    messages: list
-
-@app.post("/api/ai/process")
-async def process_ai(query: AIRequest):
-    global db_members, db_tasks
-    history = query.messages
-    import json
-    import re
-
-    # Provide context about current state for the LLM
-    member_context = [{"id": m.id, "name": m.name} for m in db_members]
-    task_context = [{"id": t.id, "title": t.title, "assignee": t.assignee_name} for t in db_tasks]
+@app.post("/api/ai/suggest")
+async def ai_suggest(req: AIRequest):
+    openai_key = os.getenv("OPENAI_API_KEY")
+    groq_key = os.getenv("GROQ_API_KEY")
     
-    system_prompt = (
-        f"You are TaskFlow AI, an agentic club management assistant. "
-        f"Current state: {len(db_tasks)} tasks, {len(db_members)} members. "
-        f"Available Members: {json.dumps(member_context)}. "
-        f"Current Tasks: {json.dumps(task_context)}. "
-        "\n\nIf the user wants to perform an action, you MUST include a structured action tag in your response. "
-        "Formats:\n"
-        "1. Add member: [ACTION: {\"type\": \"add_member\", \"name\": \"Full Name\", \"role\": \"Role\"}]\n"
-        "2. Add task: [ACTION: {\"type\": \"add_task\", \"title\": \"Task Title\", \"assignee_id\": \"member_id\", \"priority\": \"Low/Medium/High\"}]\n"
-        "3. Delete member: [ACTION: {\"type\": \"delete_member\", \"member_id\": \"member_id\"}]\n"
-        "4. Delete task: [ACTION: {\"type\": \"delete_task\", \"task_id\": \"task_id\"}]\n\n"
-        "IMPORTANT: When adding a task, if the user doesn't mention priority, you MUST ask them what priority it should be (Low, Medium, or High). "
-        "For now, if you proceed with an action without asking, default to 'Medium' in the JSON, but explicitly mention in your reply that you've set it to Medium and they can change it."
-        "\n\nBe intelligent: find the correct IDs from the lists above. If the user says 'remove Alex', find the ID for Alex."
-    )
-
-    messages_for_llm = [{"role": "system", "content": system_prompt}] + history
-
-    response_text = ""
-    if db_settings.groq_key:
-        try:
-            client = Groq(api_key=db_settings.groq_key)
+    prompt = f"Task Title: {req.title}\nDescription: {req.description}\n\nSuggest a priority (Low, Medium, High), a reminder message, and an expanded description. Return as JSON: {{\"priority\": \"...\", \"reminder\": \"...\", \"expanded_description\": \"...\"}}"
+    
+    try:
+        if groq_key:
+            client = Groq(api_key=groq_key)
             completion = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                messages=messages_for_llm
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"}
+            )
+            return completion.choices[0].message.content
+        elif openai_key:
+            client = OpenAI(api_key=openai_key)
+            completion = client.chat.completions.create(
+                model="gpt-3.5-turbo-0125",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={ "type": "json_object" }
+            )
+            return completion.choices[0].message.content
+        else:
+            return {"error": "No AI API key found"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/api/ai/process")
+async def process_ai(query: AIRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    import json
+    import re
+    
+    openai_key = os.getenv("OPENAI_API_KEY")
+    groq_key = os.getenv("GROQ_API_KEY")
+    
+    if not query.messages:
+        return {"result": "No messages provided"}
+
+    # Context for the AI
+    members = db.query(models.Member).all()
+    tasks = db.query(models.Task).all()
+    
+    member_context = [{"id": m.id, "name": m.name, "email": m.email} for m in members]
+    task_context = [{"id": t.id, "title": t.title, "assignee": t.assignee.name} for t in tasks]
+
+    system_prompt = (
+        f"You are TaskFlow AI, an agentic club management assistant. "
+        f"Current state: {len(tasks)} tasks, {len(members)} members. "
+        f"Members: {json.dumps(member_context)}. "
+        f"Tasks: {json.dumps(task_context)}. "
+        "\n\nIf the user wants to perform an action, you MUST include a structured action tag. "
+        "Formats:\n"
+        "1. Add member: [ACTION: {\"type\": \"add_member\", \"name\": \"Full Name\", \"email\": \"email@ex.com\", \"phone\": \"+123\"}]\n"
+        "2. Add task: [ACTION: {\"type\": \"add_task\", \"title\": \"Title\", \"member_name\": \"Name\", \"deadline\": \"YYYY-MM-DD\"}]\n"
+        "3. Delete task: [ACTION: {\"type\": \"delete_task\", \"task_id\": 123}]\n"
+        "4. Send notification: [ACTION: {\"type\": \"send_notification\", \"member_name\": \"Name\", \"message\": \"Your message here\"}]\n"
+        "\nIMPORTANT: Be extremely concise. DO NOT show internal IDs or full lists to the user unless they ask. "
+        "You have real email/SMS capabilities. When you add a task, tell the user: 'Task assigned and notification sent to [Name].'"
+    )
+
+    messages = [{"role": "system", "content": system_prompt}] + query.messages
+
+    response_text = ""
+    try:
+        if groq_key:
+            client = Groq(api_key=groq_key)
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages
             )
             response_text = completion.choices[0].message.content
-        except Exception as e:
-            return {"result": f"Error with Groq: {str(e)}"}
-    elif db_settings.openai_key:
-        try:
-            client = OpenAI(api_key=db_settings.openai_key)
+        elif openai_key:
+            client = OpenAI(api_key=openai_key)
             completion = client.chat.completions.create(
                 model="gpt-3.5-turbo",
-                messages=messages_for_llm
+                messages=messages
             )
             response_text = completion.choices[0].message.content
-        except Exception as e:
-            return {"result": f"Error with OpenAI: {str(e)}"}
-    else:
-        return {"result": "No API key found. Please add your Groq or OpenAI key in Settings!"}
+        else:
+            return {"result": "No API key found. Please add your Groq or OpenAI key in Settings!"}
+    except Exception as e:
+        return {"result": f"Error: {str(e)}"}
 
-    # Parse Agentic Actions from LLM response
+    # Parse Agentic Actions
     action_match = re.search(r'\[ACTION:\s*({.*?})\]', response_text)
     if action_match:
         try:
@@ -276,59 +426,68 @@ async def process_ai(query: AIRequest):
             a_type = action_data.get("type")
             
             if a_type == "add_member":
-                name = action_data["name"].title()
-                new_member = Member(
-                    id=str(uuid.uuid4()),
-                    name=name,
-                    role=action_data.get("role", "Member"),
-                    email=f"{name.lower().replace(' ', '')}@example.com",
-                    initials=name[0].upper() if name else "?",
-                    tasks_count=0,
-                    tasks_total=0
-                )
-                db_members.append(new_member)
-                response_text = response_text.replace(action_match.group(0), "").strip()
-                if len(response_text) < 10: response_text = f"✅ Added {name} to the club."
+                # Check if we have enough info
+                if not action_data.get("email") and not action_data.get("phone"):
+                    response_text = "I'd love to add " + action_data.get("name") + ", but I need an email or phone number to notify them. Could you provide one?"
+                else:
+                    new_member = models.Member(
+                        name=action_data["name"],
+                        email=action_data.get("email"),
+                        phone=action_data.get("phone")
+                    )
+                    db.add(new_member)
+                    db.commit()
+                    response_text = response_text.replace(action_match.group(0), "").strip()
+                    if not response_text: response_text = f"✅ Added {new_member.name} to the club."
 
             elif a_type == "add_task":
-                title = action_data["title"]
-                assignee_id = action_data.get("assignee_id")
-                priority = action_data.get("priority", "Medium")
-                assignee = next((m for m in db_members if m.id == assignee_id), None)
-                new_task = Task(
-                    id=str(uuid.uuid4()),
-                    title=title,
-                    description="",
-                    assignee_id=assignee.id if assignee else "0",
-                    assignee_name=assignee.name if assignee else "Unassigned",
-                    priority=priority,
-                    status="To Do",
-                    category="AI Generated",
-                    due_date="TBD"
-                )
-                db_tasks.append(new_task)
-                if assignee: assignee.tasks_count += 1
-                response_text = response_text.replace(action_match.group(0), "").strip()
-                if len(response_text) < 10: response_text = f"✅ Created task '{title}'."
+                # Find member
+                member_name = action_data.get("member_name")
+                member = db.query(models.Member).filter(models.Member.name == member_name).first()
+                if not member:
+                    response_text = f"I can't find a member named '{member_name}'. Should I create them first? If so, please provide their email."
+                else:
+                    new_task = models.Task(
+                        title=action_data["title"],
+                        description=action_data.get("description", ""),
+                        deadline=action_data.get("deadline", "2026-12-31"),
+                        member_id=member.id,
+                        status="Pending"
+                    )
+                    db.add(new_task)
+                    db.commit()
+                    db.refresh(new_task)
+                    
+                    # Trigger real notification
+                    background_tasks.add_task(send_notifications, member.name, new_task.title, new_task.deadline, member.email, member.phone)
+                    
+                    response_text = response_text.replace(action_match.group(0), "").strip()
+                    if not response_text: response_text = f"✅ Created task '{new_task.title}' for {member.name} and sent a real notification."
 
-            elif a_type == "delete_member":
-                m_id = action_data.get("member_id")
-                member = next((m for m in db_members if m.id == m_id), None)
-                if member:
-                    db_members = [m for m in db_members if m.id != m_id]
-                    response_text = response_text.replace(action_match.group(0), "").strip()
-                    if len(response_text) < 10: response_text = f"🗑️ Removed {member.name} from the club."
-            
             elif a_type == "delete_task":
-                t_id = action_data.get("task_id")
-                task = next((t for t in db_tasks if t.id == t_id), None)
+                task_id = action_data.get("task_id")
+                task = db.query(models.Task).filter(models.Task.id == task_id).first()
                 if task:
-                    db_tasks = [t for t in db_tasks if t.id != t_id]
+                    title = task.title
+                    db.delete(task)
+                    db.commit()
                     response_text = response_text.replace(action_match.group(0), "").strip()
-                    if len(response_text) < 10: response_text = f"🗑️ Deleted task '{task.title}'."
+                    if not response_text: response_text = f"✅ Deleted task '{title}'."
+                else:
+                    response_text = "I couldn't find that task to delete."
+
+            elif a_type == "send_notification":
+                member_name = action_data.get("member_name")
+                member = db.query(models.Member).filter(models.Member.name == member_name).first()
+                if member:
+                    background_tasks.add_task(send_notifications, member.name, "General Notification", "None", member.email, member.phone)
+                    response_text = response_text.replace(action_match.group(0), "").strip()
+                    if not response_text: response_text = f"✅ Notification sent to {member.name}."
+                else:
+                    response_text = f"I couldn't find a member named '{member_name}' to notify."
 
         except Exception as e:
-            print(f"Action parsing error: {e}")
+            print(f"Action error: {e}")
 
     return {"result": response_text}
 

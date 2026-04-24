@@ -29,3 +29,10 @@ dist-ssr
 
 .env
 .vite
+
+# Python
+__pycache__/
+*.pyc
+
+# Database
+*.db
